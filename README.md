@@ -1,312 +1,223 @@
-# DataGate
+# sales-order-data-cleaning
 
-### E-Commerce Order Data Cleaning & Verification Pipeline
-
+Data Cleaning & Preparation pipeline with a formal Change Log and automated Verification Gate — built for the DecodeLabs Data Analytics Internship (2026 batch).
 
 ---
 
 ## Table of Contents
 
-- [Overview](#overview)
-- [Why This Project Exists](#why-this-project-exists)
-- [Honest Note on the Dataset Used](#honest-note-on-the-dataset-used)
-- [Dataset Schema](#dataset-schema)
-- [Pipeline Stages in Detail](#pipeline-stages-in-detail)
-- [The Verification Gate](#the-verification-gate)
-- [Sample Change Log Output](#sample-change-log-output)
-- [Repository Structure](#repository-structure)
-- [Requirements](#requirements)
-- [How to Run](#how-to-run)
-- [How to Run This on Your Own Dataset](#how-to-run-this-on-your-own-dataset)
-- [Design Decisions & Reasoning](#design-decisions--reasoning)
-- [Limitations](#limitations)
-- [Possible Future Improvements](#possible-future-improvements)
-- [License](#license)
-- [Credits](#credits)
+1. [Problem Statement](#problem-statement)
+2. [Dataset Overview](#dataset-overview)
+3. [Methodology](#methodology)
+4. [Missing Value Treatment](#missing-value-treatment)
+5. [Duplicate Audit](#duplicate-audit)
+6. [Text & Category Standardization](#text--category-standardization)
+7. [Date Standardization](#date-standardization)
+8. [Numeric Precision & Logic Verification](#numeric-precision--logic-verification)
+9. [The Verification Gate](#the-verification-gate)
+10. [Change Log](#change-log)
+11. [Output Artifacts](#output-artifacts)
+12. [Key Findings](#key-findings)
+13. [Recommendations](#recommendations)
+14. [Limitations](#limitations)
+15. [Repository Structure](#repository-structure)
+16. [How to Run](#how-to-run)
+17. [Tools Used](#tools-used)
 
 ---
 
-## Overview
+## Problem Statement
 
-This is **not** a dashboard, machine learning model, or analytics/visualization project.
-It is a **data-quality pipeline** — the unglamorous but essential first step of any real
-analytics workflow. Given a raw `.xlsx` order dataset, the pipeline:
+Raw sales order data cannot be trusted for analysis, reporting, or modeling until it passes a formal quality check. This project builds a repeatable cleaning pipeline that:
 
-1. **Audits** the dataset for missing values, duplicate records, and formatting issues
-2. **Fixes** what it finds — imputation, deduplication, standardization
-3. **Verifies**, with hard code-level assertions (not just a claim in a report), that the
-   output meets a defined quality bar
-4. **Documents** every single modification in an auditable, timestamped change log
-   (Excel + formatted PDF)
+1. Identifies and resolves missing values without silently discarding data.
+2. Detects and removes duplicate records at both the full-row and unique-ID level.
+3. Standardizes text formatting, categorical values, and date formats to a single consistent standard (ISO 8601).
+4. Verifies internal business logic (that `TotalPrice` actually equals `Quantity × UnitPrice`).
+5. Proves — via an automated "Verification Gate" — that the cleaned dataset meets a 0%-error bar before it is exported.
+6. Documents every change made in a Change Log, exported as both Excel and a formatted PDF, so the cleaning process is auditable rather than a "black box."
 
-The entire pipeline runs inside a single Jupyter notebook, `Project1_Data_Cleaning.ipynb`,
-broken into clearly separated, independently readable cells — each cell does one job.
+## Dataset Overview
 
----
+- **Raw input file:** `Dataset for Data Analytics.xlsx`
+- **Rows:** 1,200 orders
+- **Columns:** 14
+- **Fields:** `OrderID`, `Date`, `CustomerID`, `Product`, `Quantity`, `UnitPrice`, `ShippingAddress`, `PaymentMethod`, `OrderStatus`, `TrackingNumber`, `ItemsInCart`, `CouponCode`, `ReferralSource`, `TotalPrice`
+- **Data types on load:** `Date` loads natively as `datetime64` (since the source is Excel, not CSV); `Quantity` and `ItemsInCart` are integers; `UnitPrice` and `TotalPrice` are floats; the remaining 9 columns are text/object type.
 
-## Why This Project Exists
+## Methodology
 
-Industry data is rarely analysis-ready. Bad data that goes unnoticed doesn't throw an
-error — it just quietly produces wrong totals, wrong charts, and wrong conclusions.
+The notebook (`The_verification_gate_your_data_has_to_pass.ipynb`) runs a linear, gated pipeline:
 
-This project treats data cleaning as a discipline with its own standards, not a one-off script:
-- Every fix is **justified and logged**, not silently applied
-- The "is this actually clean now?" question is **answered with code**, not assumed
-- Fixing issues (blank fields, duplicate keys, bad dates) uses defensible statistical/logical
-  methods (median imputation, canonical deduplication, ISO 8601 standardization) rather than
-  ad hoc guesses
+1. **Imports** — pandas, NumPy, `datetime`.
+2. **Load the raw dataset** from Excel and keep an untouched copy (`df_raw`) for before/after comparison.
+3. **Initial inspection** — `df.info()` and a full column list.
+4. **Identify missing values** — build a `missing_summary` table of null counts and percentages per column.
+5. **Impute missing values** using a tiered strategy: explicit business-logic labeling for `CouponCode`, median imputation for any numeric column with nulls, and mode imputation for any other categorical column with nulls — every action is logged to an in-memory `change_log` list as it happens.
+6. **Duplicate audit** — check full-row duplicates, duplicate `OrderID`s, and duplicate `TrackingNumber`s; also run a SQL-style `GROUP BY ... HAVING COUNT(*) > 1` equivalent to find any duplicated `OrderID`s.
+7. **Remove duplicates** — drop full-row duplicates, then collapse any duplicate `OrderID`s to a single canonical row (keep first).
+8. **Standardize text columns** — trim whitespace and apply consistent Title Case to all text/categorical columns (except ID-like columns: `OrderID`, `CustomerID`, `TrackingNumber`, `CouponCode`).
+9. **Standardize dates to ISO 8601** — convert `Date` to `datetime`, coercing unparseable values to null, then format as `YYYY-MM-DD` strings.
+10. **Enforce numeric precision** — round `UnitPrice` and `TotalPrice` to 2 decimal places.
+11. **Verify business logic** — recompute `Quantity × UnitPrice` and compare it against the existing `TotalPrice`; auto-correct any row where they don't match within a 1-cent tolerance.
+12. **Run the Verification Gate** — a hard `assert`-based check that duplicate ID rate, bad date format rate, and remaining null count are all exactly 0 before the pipeline is allowed to proceed.
+13. **Build the Change Log** — assemble every logged change into a structured `change_log_df` table.
+14. **Export the "gold standard" dataset** — save the cleaned data to `Cleaned_Dataset_for_Data_Analytics.xlsx` and the change log to `Change_Log.xlsx`.
+15. **Generate a formal PDF Change Log** — using ReportLab, render the change log as a styled, wrapped-text PDF table (`Change_Log.pdf`) alongside the Verification Gate's final error rates.
 
----
+## Missing Value Treatment
 
-## Honest Note on the Dataset Used
+**Before cleaning**, only one of the 14 columns had missing values:
 
-The specific dataset processed in this repository (`Dataset_for_Data_Analytics.xlsx` — 1,200
-rows, 14 columns of e-commerce order data) turned out to be **largely clean already** when
-audited. Full transparency on what was actually found:
-
-| Issue category | Found in this dataset? |
-|---|---|
-| Missing values | Yes — 309 blank `CouponCode` values (25.75% of rows) |
-| Full-row duplicates | None found |
-| Duplicate `OrderID` values | None found |
-| Duplicate `TrackingNumber` values | None found |
-| Inconsistent date formats | None found — dates parsed cleanly |
-| Whitespace / casing inconsistencies | None found |
-| `TotalPrice ≠ Quantity × UnitPrice` mismatches | None found |
-
-The `CouponCode` nulls are not really "dirty data" either — a blank there legitimately means
-"no coupon was applied to this order," not a data entry error.
-
-**This README will not overstate what the pipeline "rescued."** The code itself is written
-generically and defensively (see [Design Decisions](#design-decisions--reasoning) below) so
-that it will actively detect and repair a genuinely messy dataset — duplicate records, mixed
-date formats, inconsistent capitalization, incorrect totals — if pointed at one. The clean
-result in this repo's output files simply reflects that this particular dataset started in
-good shape. The value of the project is in the *pipeline and its verification discipline*,
-not in a dramatic before/after on this specific file.
-
----
-
-## Dataset Schema
-
-| Column | Type | Description |
+| Column | Missing Count | Missing % |
 |---|---|---|
-| `OrderID` | string | Unique order identifier (e.g. `ORD200000`) |
-| `Date` | date | Order date |
-| `CustomerID` | string | Customer identifier (e.g. `C72649`) |
-| `Product` | string | Product name (Monitor, Phone, Tablet, Chair, Printer, Laptop, Desk) |
-| `Quantity` | integer | Units ordered |
-| `UnitPrice` | float | Price per unit |
-| `ShippingAddress` | string | Shipping street address |
-| `PaymentMethod` | string | Debit Card, Credit Card, Online, Gift Card, Cash |
-| `OrderStatus` | string | Shipped, Cancelled, Returned, Delivered, Pending |
-| `TrackingNumber` | string | Shipment tracking code |
-| `ItemsInCart` | integer | Number of items in the cart at checkout |
-| `CouponCode` | string / null | Coupon applied, if any |
-| `ReferralSource` | string | Instagram, Referral, Email, Facebook, Google |
-| `TotalPrice` | float | `Quantity x UnitPrice` |
+| CouponCode | 309 | 25.75% |
 
----
+No numeric column and no other categorical column had any nulls, so the notebook's median-imputation and mode-imputation branches were present in the code but did not trigger for this dataset.
 
-## Pipeline Stages in Detail
+**Treatment applied:** `CouponCode` nulls were filled with the explicit label `"No Coupon"` rather than dropped or guessed at, since a blank coupon code legitimately means no coupon was used at checkout — not that data was lost. This preserved all 309 affected rows rather than discarding them.
 
-### 1. Missing Value Audit
-Counts nulls per column and reports both raw count and percentage before any changes are made.
+**Result:** `Total missing values remaining: 0` (confirmed by the notebook's own printed output immediately after imputation).
 
-### 2. Imputation (never blind deletion)
-Listwise deletion (dropping any row with a gap) reduces statistical power and can bias results.
-Instead:
-- **Numeric columns** → filled with the **median** (robust to outliers, unlike the mean)
-- **Categorical/text columns** → filled with the **mode** (most frequent value)
-- **`CouponCode` specifically** → filled with an explicit `"No Coupon"` label, since a blank
-  there is a legitimate business state, not an error
+## Duplicate Audit
 
-### 3. Duplicate Audit & Removal
-- Checks for fully duplicated rows
-- Checks for duplicate `OrderID` values using a `groupby`-based check equivalent to
-  `GROUP BY OrderID HAVING COUNT(*) > 1` in SQL
-- Removes exact duplicate rows outright
-- Collapses duplicate `OrderID`s down to a single canonical record (first occurrence kept)
+The notebook's own printed output:
 
-### 4. Text Standardization
-- Strips leading/trailing whitespace from every text column
-- Applies consistent Title Case to categorical fields (e.g. `"credit card"` → `"Credit Card"`)
-- Skips ID-style columns (`OrderID`, `CustomerID`, `TrackingNumber`, `CouponCode`) since
-  altering their casing would be incorrect
+```
+Full duplicate rows: 0
+Duplicate OrderID values: 0
+Duplicate TrackingNumber values: 0
+```
 
-### 5. Date Standardization
-- Parses the `Date` column using `pandas.to_datetime`, which handles multiple input formats
-- Any value that cannot be parsed becomes an explicit null (`NaT`) rather than a silent
-  wrong guess
-- Reformats every valid date into **ISO 8601** (`YYYY-MM-DD`) — unambiguous, sortable, and
-  usable in date arithmetic
+The SQL-style `GROUP BY OrderID HAVING COUNT(*) > 1` check returned an **empty DataFrame** — confirming zero duplicate `OrderID`s existed even before the explicit de-duplication step ran.
 
-### 6. Numeric Precision
-Rounds monetary columns (`UnitPrice`, `TotalPrice`) to exactly 2 decimal places, removing
-floating-point noise (e.g. `570.6199999999999` → `570.62`).
+**De-duplication step result:**
 
-### 7. Business-Logic Consistency Check
-Beyond formatting, verifies the data is *factually* correct: recalculates
-`Quantity x UnitPrice` for every row and compares it to the stored `TotalPrice`. Any row
-more than one cent off is corrected. This catches arithmetic errors that would otherwise be
-invisible — a row can look perfectly formatted and still contain the wrong number.
+```
+Rows before: 1200 | Rows after: 1200 | Removed: 0
+```
 
-### 8. Documentation (Change Log)
-Every fix applied by stages 2–7 is logged with:
-- A **Change ID** (e.g. `CR001`, `CR_DEDUPE`)
-- A plain-English **Description** of what was done
-- The **Impact** (how many records/cells were affected)
-- A **Status** (Resolved)
+The dataset was already free of duplicates; the de-duplication logic ran successfully but had nothing to remove.
 
-This list is exported both as a spreadsheet (`Change_Log.xlsx`) and a formatted PDF report
-(`Change_Log.pdf`) with a styled, word-wrapped table suitable for handing to a stakeholder.
+## Text & Category Standardization
 
----
+All text/categorical columns were trimmed of whitespace and converted to Title Case (excluding ID-like columns). The notebook's own output confirms the categories were **already clean** before this step — 0 cells required formatting correction — and lists the standardized (and already-consistent) category sets:
+
+- **Product:** Chair, Desk, Laptop, Monitor, Phone, Printer, Tablet
+- **PaymentMethod:** Cash, Credit Card, Debit Card, Gift Card, Online
+- **OrderStatus:** Cancelled, Delivered, Pending, Returned, Shipped
+- **ReferralSource:** Email, Facebook, Google, Instagram, Referral
+
+## Date Standardization
+
+`Date` was converted to `datetime` (coercing any unparseable values to null) and reformatted as ISO 8601 strings (`YYYY-MM-DD`). Sample of the standardized output:
+
+```
+        Date
+0 2023-01-04
+1 2024-08-23
+2 2024-02-27
+3 2023-10-15
+4 2025-05-08
+```
+
+Zero dates were unparseable — no rows were lost or flagged as bad dates during this conversion.
+
+## Numeric Precision & Logic Verification
+
+- **Precision enforcement:** `UnitPrice` and `TotalPrice` were rounded to 2 decimal places across all 1,200 records (sample: `570.62 → 2853.10`, `151.35 → 302.70`, etc. — values were already at 2-decimal precision, so no visible rounding occurred).
+- **Business logic check:** the notebook recalculated `Quantity × UnitPrice` for every row and compared it against the stored `TotalPrice` (within a $0.01 tolerance).
+
+```
+TotalPrice mismatches found & fixed: 0
+```
+
+All 1,200 `TotalPrice` values were already internally consistent with `Quantity × UnitPrice` — no corrections were necessary.
 
 ## The Verification Gate
 
-The final pipeline stage does not fix anything — it **proves** the earlier stages worked, and
-refuses to let the notebook proceed silently if they didn't:
-
-```python
-assert dup_id_rate == 0,   "Verification Gate failed: duplicate OrderIDs remain"
-assert bad_date_rate == 0, "Verification Gate failed: badly formatted dates remain"
-assert remaining_nulls == 0, "Verification Gate failed: missing values remain"
-```
-
-If any assertion fails, the notebook **stops with an error** instead of quietly producing an
-export that still has problems. A completed run is verifiable evidence, not just an assumption.
-
-Required thresholds (from the project brief):
-- **0% duplicate unique identifiers**
-- **0% incorrectly formatted dates**
-
----
-
-## Sample Change Log Output
-
-From an actual run against the included dataset:
-
-| Change ID | Description | Impact | Status |
-|---|---|---|---|
-| CR001 | Imputed `CouponCode` missing values with explicit label `"No Coupon"` | Preserved 309 records (avoided deletion) | Resolved |
-| CR_DEDUPE | Removed full-row duplicates and collapsed duplicate `OrderID` records | Removed 0 duplicate record(s); 1,200 unique records remain | Resolved |
-| CR_TEXT_STD | Trimmed whitespace and applied consistent Title Case | Corrected formatting on 0 cell(s) | Resolved |
-| CR_DATE_ISO | Converted `Date` column to ISO 8601 format | Standardized 1,200 records; 0 unparseable dates | Resolved |
-| CR_NUMERIC_PRECISION | Rounded `UnitPrice`, `TotalPrice` to 2 decimal places | Applied to 1,200 records | Resolved |
-| CR_LOGIC_TOTALPRICE | Verified `TotalPrice` equals `Quantity x UnitPrice` | No corrections needed — 0 mismatches found | Resolved |
-
-**Verification Gate result:** Duplicate ID error rate = 0.00% · Bad date format rate = 0.00% · Remaining nulls = 0 → **PASSED**
-
----
-
-
----
-
-## Requirements
+Before exporting, the pipeline runs a hard, `assert`-enforced gate that fails the notebook outright if any of the three conditions below are not met. The notebook's own printed result:
 
 ```
-pandas
-numpy
-openpyxl
-reportlab
+Duplicate ID error rate:   0.00%  (target: 0%)
+Bad date format error rate: 0.00%  (target: 0%)
+Remaining missing values:  0  (target: 0)
+
+VERIFICATION GATE: PASSED ✅
 ```
 
-Install everything with:
-```bash
-pip install pandas numpy openpyxl reportlab
-```
+This is not a soft warning — the `assert` statements would halt execution with an `AssertionError` if any condition failed, meaning the cleaned file could not be exported until the dataset passed.
 
----
+## Change Log
 
-## How to Run
+Full change log as built and exported by the notebook:
 
-1. Clone this repository or download its files into one folder.
-2. Make sure `Dataset_for_Data_Analytics.xlsx` is in the same folder as the notebook
-   (or update the `RAW_FILE` path inside Cell 2 to point to your file's location).
-3. Open `Project1_Data_Cleaning.ipynb` in Jupyter Notebook, JupyterLab, or VS Code.
-4. Run every cell from top to bottom (`Kernel → Restart & Run All` is the safest option).
-5. If the Verification Gate cell raises an `AssertionError`, the dataset still has an
-   unresolved issue that needs a look — that is the pipeline correctly refusing to certify
-   imperfect data as clean, not a bug.
-6. On success, three files are written to the project folder:
-   `Cleaned_Dataset_for_Data_Analytics.xlsx`, `Change_Log.xlsx`, and `Change_Log.pdf`.
+| No. | Change ID | Description | Impact | Status |
+|---|---|---|---|---|
+| 1 | CR001 | Imputed `CouponCode` missing values with explicit label "No Coupon" | Preserved 309 records (avoided deletion) | Resolved |
+| 2 | CR_DEDUPE | Removed full-row duplicates and collapsed duplicate `OrderID` records to a single canonical row | Removed 0 duplicate record(s); 1,200 unique records remain | Resolved |
+| 3 | CR_TEXT_STD | Trimmed whitespace and applied consistent Title Case across text/categorical columns | Corrected formatting on 0 cell(s) | Resolved |
+| 4 | CR_DATE_ISO | Converted `Date` column to ISO 8601 format (YYYY-MM-DD) | Standardized 1,200 records; 0 unparseable date(s) flagged | Resolved |
+| 5 | CR_NUMERIC_PRECISION | Rounded `UnitPrice`, `TotalPrice` to 2 decimal places for numeric consistency | Applied to 1,200 records | Resolved |
+| 6 | CR_LOGIC_TOTALPRICE | Verified `TotalPrice` equals `Quantity × UnitPrice` for all records | No corrections needed — 0 mismatches found | Resolved |
 
----
+Six change types were logged in total. Only one of them (`CR001`) involved an actual data correction (imputing 309 missing `CouponCode` values); the remaining five ran as verification/standardization passes that confirmed the data was already compliant.
 
-## How to Run This on Your Own Dataset
+## Output Artifacts
 
-The pipeline is written generically, so it should work on any similarly structured
-order/transaction dataset with minimal changes:
+Running the notebook end-to-end produces three files:
 
-1. Update `RAW_FILE` in Cell 2 to your file's path.
-2. Check that your column names match what the notebook expects (`OrderID`, `Date`,
-   `Quantity`, `UnitPrice`, `TotalPrice`, etc.), or adjust the column references in
-   Cells 5–11 to match your schema.
-3. Re-run all cells. The pipeline will report exactly what it found and fixed for *your*
-   data — including cases with real duplicates, mixed date formats, or arithmetic errors,
-   which this particular sample dataset did not have.
+| File | Description |
+|---|---|
+| `Cleaned_Dataset_for_Data_Analytics.xlsx` | The final "gold standard" cleaned dataset — same 1,200 rows × 14 columns, with `CouponCode` nulls resolved and `Date` in ISO 8601 format |
+| `Change_Log.xlsx` | The six-row change log table shown above, exported as a spreadsheet |
+| `Change_Log.pdf` | A formatted PDF version of the change log, built with ReportLab, including a title block, a styled/wrapped table, and the Verification Gate's final error rates printed at the bottom |
 
----
+**Note:** installing `reportlab` required two attempts in the original run (`!pip install reportlab` failed due to a network/DNS error; `!{sys.executable} -m pip install reportlab` succeeded and installed `reportlab-5.0.0`). Both install cells are retained in the notebook.
 
-## Design Decisions & Reasoning
+## Key Findings
 
-- **Median over mean for numeric imputation** — the median is far less sensitive to outliers
-  (e.g. one $10,000 order won't drag every imputed value upward).
-- **Explicit "No Coupon" label instead of imputing a fake coupon code** — imputing a
-  categorical placeholder value that doesn't exist in the real category set would be
-  misleading; a clear label preserves meaning.
-- **Deduplicate by keeping the first occurrence** — a simple, defensible, reproducible rule.
-  (An alternative would be keeping the *most complete* row, which is a reasonable extension
-  — see [Limitations](#limitations).)
-- **`errors="coerce"` on date parsing** — an unparseable date becomes an explicit missing
-  value rather than the pipeline silently guessing a date and being wrong.
-- **Hard `assert`s in the Verification Gate rather than just print statements** — a
-  print statement can be ignored; a failed assertion stops execution and forces attention.
+| # | Finding | Supporting Evidence |
+|---|---|---|
+| 1 | The dataset had exactly one column with missing data. | `CouponCode`: 309 nulls (25.75%). All other 13 columns were 100% complete on load. |
+| 2 | The dataset contained **zero duplicate records** of any kind before cleaning even began. | Full duplicate rows: 0; duplicate `OrderID`s: 0; duplicate `TrackingNumber`s: 0 — confirmed both by direct checks and a SQL-style `GROUP BY` query. |
+| 3 | Categorical/text formatting was already fully consistent. | 0 cells required whitespace trimming or case correction across all text columns. |
+| 4 | All 1,200 dates were valid and parseable. | 0 unparseable dates after ISO 8601 conversion. |
+| 5 | `TotalPrice` was internally consistent with `Quantity × UnitPrice` for every single row. | 0 mismatches found in the business-logic verification step. |
+| 6 | The dataset passed the Verification Gate on the first run, with no failed assertions. | Duplicate ID rate 0.00%, bad date rate 0.00%, remaining nulls 0 — all three gate conditions met simultaneously. |
+| 7 | Despite the dataset being nearly pristine, the pipeline still executed all six planned cleaning/verification steps rather than skipping them. | The Change Log documents all six change types (`CR001` through `CR_LOGIC_TOTALPRICE`), even where the "impact" was zero corrections — proving the checks ran rather than assuming cleanliness. |
 
-  **Output
+## Recommendations
 
-
-  <img width="1086" height="485" alt="image" src="https://github.com/user-attachments/assets/bf4a2f7f-7c49-462b-a4b0-7a3e8846b4c0" />
-
-
----
+- **Treat `CouponCode`'s missingness as expected, not exceptional**, in any downstream analysis — the "No Coupon" label should be used directly as a valid category rather than re-investigated as a data quality issue.
+- **Keep the Verification Gate's `assert` statements in place** even as the dataset evolves — since this run passed cleanly, the gate hasn't yet been tested against a genuinely dirty version of the data; it should remain strict rather than relaxed.
+- **Re-run this pipeline whenever a new raw extract arrives**, rather than assuming future extracts will be as clean as this one — the low error rates here reflect this specific file, not a guarantee about the data source going forward.
+- **Fix the hardcoded local file path** (`C:\Users\SAIM\Downloads\Dataset for Data Analytics.xlsx`) before sharing or re-running this notebook elsewhere — see [How to Run](#how-to-run).
+- **Consider adding at least one deliberately "dirty" test case** (e.g., a synthetic duplicate row or malformed date) to a test copy of the dataset, to confirm the Verification Gate actually fails when it should — the current run only proves it passes clean data, not that it correctly catches dirty data.
 
 ## Limitations
 
-- Deduplication currently keeps the *first* occurrence of a duplicate `OrderID`, not
-  necessarily the *most complete or most recent* one. On a dataset with real duplicates
-  that differ in completeness, a more sophisticated "keep the row with fewest nulls" rule
-  might be preferable.
-- Outlier detection (e.g. a `Quantity` of 99,999) is not currently implemented — the pipeline
-  checks *consistency* (does `TotalPrice` match the formula) but not statistical
-  *plausibility* (is this value realistic at all).
-- Text standardization uses Title Case as a single global rule; a dataset with legitimate
-  mixed-case values (e.g. brand names like "iPhone") would need a custom exception list.
-- The pipeline is designed for datasets that fit comfortably in memory via pandas; very
-  large files (multi-million rows) would benefit from a chunked or Dask-based approach.
+- This notebook cleans and verifies the data but does **not** analyze it — there are no summary statistics, charts, or business insights here; that work belongs in a separate EDA notebook.
+- Because the source dataset was already very clean (0 duplicates, 0 bad dates, 0 logic mismatches), this run does not demonstrate what the pipeline does when it actually encounters and must correct dirty data — only that the checks execute and pass.
+- The PDF generation step depends on the third-party `reportlab` package, which is not part of the standard `pandas`/`numpy` stack and must be installed separately (see [How to Run](#how-to-run)).
+- The notebook loads the raw file from a local Windows path (`C:\Users\SAIM\Downloads\Dataset for Data Analytics.xlsx`); this must be changed to a relative path before the notebook will run in a cloned repository.
+- Median/mode imputation logic exists in the code for numeric and other categorical columns but was never actually exercised in this run, since only `CouponCode` had missing values — this logic is therefore unverified against real missing numeric/categorical data.
+
+
+
+
+
+**Before running:** update the file path in Cell 2 from the original local path to a relative path so it works in any cloned copy of this repo:
+
+```python
+RAW_FILE = "Dataset for Data Analytics.xlsx"
+```
+
+`Dataset for Data Analytics.xlsx` must be placed in the same folder as the notebook. Run all cells top to bottom; the three output files will be generated automatically in the working directory.
+
+## Tools Used
+
+Python, pandas, NumPy, `datetime`, ReportLab, Jupyter Notebook.
 
 ---
-
-## Possible Future Improvements
-
-- Add outlier/statistical-plausibility checks (e.g. flag `Quantity` or `UnitPrice` values
-  beyond N standard deviations from the mean)
-- Make the deduplication rule configurable (first vs. most-complete vs. most-recent)
-- Add a command-line interface (`python clean.py --input file.xlsx --output clean.xlsx`)
-  so the pipeline can run outside of Jupyter
-- Add automated unit tests (e.g. `pytest`) for each cleaning function
-- Support CSV input/output in addition to Excel
-
----
-
-## License
-
-No license has been set yet. Add one (e.g. MIT) in a `LICENSE` file if you intend for others
-to reuse or contribute to this code.
-
----
-
-## Credits
-
-Built as Project 1 of the DecodeLabs Industrial Training Kit, Batch 2026.
+*Data Cleaning & Preparation — DecodeLabs Data Analytics Internship, 2026 Batch.*
